@@ -1,0 +1,377 @@
+---
+title: "Preprocessing"
+format: html
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{python}
+from pathlib import Path
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import Point
+from scipy.stats import sem
+```
+
+```{python}
+project_dir = Path.cwd()
+data_dir = project_dir / "data"
+
+crimes_csv = data_dir / "crimes_2011_2018.csv"
+streetlights_csv = data_dir / "streetlight_chicago.csv"
+tracts_shp = data_dir / "illinois_tract_income" / "illinois_tract_income.shp"
+
+buffers_geojson = data_dir / "streetlights_buffers.geojson"
+events_geojson = data_dir / "streetlight_crime_events.geojson"
+all_crimes_joined_geojson = data_dir / "all_crimes_streetlight_joined.geojson"
+
+# processed outputs for static plots
+ev30_tracts_csv = data_dir / "processed_ev30_tracts.csv"
+tract_agg_csv = data_dir / "processed_tract_agg.csv"
+tc_all_csv = data_dir / "processed_tc_all.csv"
+excess_df_csv = data_dir / "processed_excess_df.csv"
+top_types_csv = data_dir / "processed_top_types.csv"
+```
+
+```{python}
+street_df = pd.read_csv(streetlights_csv)
+
+if "latitude" not in street_df.columns or "longitude" not in street_df.columns:
+    raise ValueError("streetlights_chicago.csv must contain latitude and longitude columns.")
+
+street_geom = [Point(xy) for xy in zip(street_df["longitude"], street_df["latitude"])]
+street_gdf = gpd.GeoDataFrame(street_df, geometry=street_geom, crs="EPSG:4326").to_crs(epsg=3435)
+
+buffer_sizes = [15, 30, 50]
+buffer_parts = []
+
+for size in buffer_sizes:
+    temp = street_gdf.copy()
+    temp["buffer_radius_m"] = size
+    temp["geometry"] = temp.geometry.buffer(size)
+    buffer_parts.append(temp)
+
+buffers = gpd.GeoDataFrame(pd.concat(buffer_parts, ignore_index=True), crs=street_gdf.crs)
+buffers.to_file(buffers_geojson, driver="GeoJSON")
+
+print("Saved:", buffers_geojson)
+print("Rows:", len(buffers))
+```
+
+```{python}
+buffers = gpd.read_file(buffers_geojson)
+
+if "creation_date" not in buffers.columns and "creating_date" in buffers.columns:
+    buffers = buffers.rename(columns={"creating_date": "creation_date"})
+if "completion_date" not in buffers.columns and "completed_date" in buffers.columns:
+    buffers = buffers.rename(columns={"completed_date": "completion_date"})
+
+needed_buf = {"creation_date", "completion_date", "buffer_radius_m", "geometry", "service_request_number"}
+missing_buf = needed_buf - set(buffers.columns)
+if missing_buf:
+    raise ValueError(f"Missing buffer columns: {missing_buf}")
+
+buffers["creation_date"] = pd.to_datetime(buffers["creation_date"], errors="coerce")
+buffers["completion_date"] = pd.to_datetime(buffers["completion_date"], errors="coerce")
+buffers = buffers.dropna(subset=["creation_date", "completion_date"]).copy()
+
+if buffers.crs is None or buffers.crs.to_epsg() != 3435:
+    buffers = buffers.to_crs(epsg=3435)
+
+buffers["request_id"] = buffers["service_request_number"].astype(str)
+```
+
+```{python}
+crime_df = pd.read_csv(crimes_csv)
+
+needed_crime = {"id", "date", "latitude", "longitude"}
+missing_crime = needed_crime - set(crime_df.columns)
+if missing_crime:
+    raise ValueError(f"Missing crime columns: {missing_crime}")
+
+crime_df["crime_date"] = pd.to_datetime(crime_df["date"], errors="coerce")
+crime_df = crime_df.dropna(subset=["crime_date", "latitude", "longitude"]).copy()
+
+crime_geom = [Point(xy) for xy in zip(crime_df["longitude"], crime_df["latitude"])]
+crime_gdf = gpd.GeoDataFrame(crime_df, geometry=crime_geom, crs="EPSG:4326").to_crs(epsg=3435)
+
+print("Crimes loaded:", len(crime_gdf))
+```
+
+```{python}
+joined = gpd.sjoin(
+    crime_gdf,
+    buffers,
+    how="inner",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+joined["crime_date"] = pd.to_datetime(joined["crime_date"], errors="coerce")
+joined["creation_date"] = pd.to_datetime(joined["creation_date"], errors="coerce")
+joined["completion_date"] = pd.to_datetime(joined["completion_date"], errors="coerce")
+
+joined = joined.dropna(subset=["completion_date"]).copy()
+
+joined["time_to_fix"] = (
+    (joined["completion_date"] - joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+joined["days_from_outage_request"] = (
+    (joined["crime_date"] - joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+# keep only -10 days before to completion
+window_mask = (
+    (joined["days_from_outage_request"] >= -10) &
+    (joined["days_from_outage_request"] <= joined["time_to_fix"])
+)
+joined = joined[window_mask].copy()
+
+joined["crime_streetlight_outage"] = (joined["days_from_outage_request"] >= 0).astype(int)
+joined["crime_outside_outage"] = (joined["crime_streetlight_outage"] == 0).astype(int)
+
+event_cols = [
+    "id", "primary_type", "crime_date", "year",
+    "community_area", "beat", "district", "ward",
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status",
+    "crime_streetlight_outage", "crime_outside_outage",
+    "time_to_fix", "days_from_outage_request",
+    "geometry"
+]
+event_cols = [c for c in event_cols if c in joined.columns]
+joined = joined[event_cols]
+
+joined.to_file(events_geojson, driver="GeoJSON")
+print("Saved:", events_geojson)
+print("Rows:", len(joined))
+```
+
+```{python}
+buffers_30 = buffers[buffers["buffer_radius_m"] == 30].copy()
+
+buf_cols = [
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status", "geometry",
+]
+buf_cols = [c for c in buf_cols if c in buffers_30.columns]
+buffers_30 = buffers_30[buf_cols]
+
+all_joined = gpd.sjoin(
+    crime_gdf,
+    buffers_30,
+    how="left",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+all_joined["creation_date"] = pd.to_datetime(all_joined["creation_date"], errors="coerce")
+all_joined["completion_date"] = pd.to_datetime(all_joined["completion_date"], errors="coerce")
+
+all_joined["days_from_outage_request"] = (
+    (all_joined["crime_date"] - all_joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+all_joined["time_to_fix"] = (
+    (all_joined["completion_date"] - all_joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+def outage_flag(row):
+    if pd.isna(row["days_from_outage_request"]) or pd.isna(row["time_to_fix"]):
+        return float("nan")
+    return int(0 <= row["days_from_outage_request"] <= row["time_to_fix"])
+
+all_joined["crime_streetlight_outage"] = all_joined.apply(outage_flag, axis=1)
+
+all_cols = [
+    "id", "primary_type", "crime_date", "year",
+    "community_area", "beat", "district", "ward",
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status",
+    "crime_streetlight_outage", "time_to_fix", "days_from_outage_request",
+    "geometry"
+]
+all_cols = [c for c in all_cols if c in all_joined.columns]
+all_joined = all_joined[all_cols]
+
+all_joined.to_file(all_crimes_joined_geojson, driver="GeoJSON")
+print("Saved:", all_crimes_joined_geojson)
+print("Rows:", len(all_joined))
+```
+
+```{python}
+events = gpd.read_file(events_geojson)
+tracts_gdf = gpd.read_file(tracts_shp)
+
+tracts_gdf = tracts_gdf.to_crs(events.crs)
+
+events["days_from_outage_request"] = pd.to_numeric(events["days_from_outage_request"], errors="coerce")
+events["time_to_fix"] = pd.to_numeric(events["time_to_fix"], errors="coerce")
+events["crime_streetlight_outage"] = pd.to_numeric(events["crime_streetlight_outage"], errors="coerce")
+events["buffer_radius_m"] = pd.to_numeric(events["buffer_radius_m"], errors="coerce")
+events["crime_date"] = pd.to_datetime(events["crime_date"], errors="coerce")
+
+# nighttime only for static analysis
+events = events[events["crime_date"].dt.hour >= 17].copy()
+events = events[events["time_to_fix"] <= 365].copy()
+
+# 30m main analysis sample
+ev30 = events[events["buffer_radius_m"] == 30].copy()
+
+top_types = ev30["primary_type"].value_counts().head(10).index.tolist()
+pd.DataFrame({"crime_type": top_types}).to_csv(top_types_csv, index=False)
+
+ev30 = ev30[ev30["primary_type"].isin(top_types)].copy()
+
+ev30_tracts = gpd.sjoin(
+    ev30[[
+        "request_id", "service_request_number", "crime_streetlight_outage",
+        "time_to_fix", "days_from_outage_request", "primary_type", "geometry"
+    ]],
+    tracts_gdf[["GEOID", "ASQPE001", "geometry"]],
+    how="left",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+ev30_tracts.to_csv(ev30_tracts_csv, index=False)
+print("Saved:", ev30_tracts_csv)
+```
+
+```{python}
+crimes_per_tract = (
+    ev30_tracts.groupby("GEOID")["crime_streetlight_outage"]
+    .sum()
+    .reset_index(name="crimes_during_outage")
+)
+
+ttf_cap = ev30_tracts.drop_duplicates(subset=["request_id"])["time_to_fix"].quantile(0.95)
+ev30_tracts["time_to_fix_w"] = ev30_tracts["time_to_fix"].clip(upper=ttf_cap)
+
+outage_days_per_tract = (
+    ev30_tracts.drop_duplicates(subset=["GEOID", "request_id"])
+    .groupby("GEOID")
+    .agg(
+        n_requests=("request_id", "nunique"),
+        total_outage_days=("time_to_fix_w", "sum"),
+        median_income=("ASQPE001", "first"),
+    )
+    .reset_index()
+)
+
+tract_agg = crimes_per_tract.merge(outage_days_per_tract, on="GEOID")
+tract_agg["crime_per_outage_day"] = (
+    tract_agg["crimes_during_outage"] / tract_agg["total_outage_days"]
+)
+
+tract_agg = tract_agg[tract_agg["median_income"] > 0].copy()
+tract_agg.to_csv(tract_agg_csv, index=False)
+
+print("Saved:", tract_agg_csv)
+print("Rows:", len(tract_agg))
+```
+
+```{python}
+outage_days_base = outage_days_per_tract[
+    ["GEOID", "total_outage_days", "median_income", "n_requests"]
+].copy()
+
+def before_during_tract(ev30_tracts_sub, outage_days_df):
+    sym = ev30_tracts_sub[
+        ev30_tracts_sub["days_from_outage_request"].abs() <= ev30_tracts_sub["time_to_fix"]
+    ].copy()
+
+    pre = (
+        sym[sym["crime_streetlight_outage"] == 0]
+        .groupby("GEOID")
+        .size()
+        .reset_index(name="pre_n")
+    )
+
+    dur = (
+        sym[sym["crime_streetlight_outage"] == 1]
+        .groupby("GEOID")
+        .size()
+        .reset_index(name="dur_n")
+    )
+
+    result = outage_days_df.merge(pre, on="GEOID", how="left").merge(dur, on="GEOID", how="left")
+    result["pre_n"] = result["pre_n"].fillna(0)
+    result["dur_n"] = result["dur_n"].fillna(0)
+    result["pre_rate"] = result["pre_n"] / result["total_outage_days"]
+    result["dur_rate"] = result["dur_n"] / result["total_outage_days"]
+    result["rate_change"] = result["dur_rate"] - result["pre_rate"]
+    result["crime_increased"] = result["rate_change"] > 0
+    return result[result["median_income"] > 0].copy()
+
+tc_all = before_during_tract(ev30_tracts, outage_days_base)
+tc_all.to_csv(tc_all_csv, index=False)
+
+print("Saved:", tc_all_csv)
+print("Rows:", len(tc_all))
+```
+
+```{python}
+# choose symmetric window width
+W = 7
+
+ev_sym = ev30[
+    ev30["days_from_outage_request"].abs() <= W
+].copy()
+
+outage_ttf = (
+    ev_sym.drop_duplicates(subset=["service_request_number"])
+    .set_index("service_request_number")["time_to_fix"]
+)
+
+def per_outage_excess(ev_subset, w=W):
+    ev_subset = ev_subset.copy()
+    ev_subset["period"] = np.where(
+        ev_subset["days_from_outage_request"] >= 0,
+        "during",
+        "before"
+    )
+
+    counts = (
+        ev_subset.groupby(["service_request_number", "period"])
+        .size()
+        .unstack(fill_value=0)
+    )
+
+    for col in ["before", "during"]:
+        if col not in counts.columns:
+            counts[col] = 0
+
+    ttf = outage_ttf.reindex(counts.index)
+    counts = counts[ttf.notna()].copy()
+    counts["before_rate"] = counts["before"] / w
+    counts["during_rate"] = counts["during"] / w
+    counts["excess"] = counts["during_rate"] - counts["before_rate"]
+    counts["time_to_fix"] = ttf.reindex(counts.index).values
+    return counts.dropna(subset=["time_to_fix"]).reset_index()
+
+excess_df = per_outage_excess(ev_sym)
+excess_df.to_csv(excess_df_csv, index=False)
+
+print("Saved:", excess_df_csv)
+print("Rows:", len(excess_df))
+```
+
+```{python}
+print("Top crime types:")
+print(top_types)
+
+print("\ntract_agg preview:")
+print(tract_agg.head())
+
+print("\ntc_all preview:")
+print(tc_all.head())
+
+print("\nexcess_df preview:")
+print(excess_df.head())
+```
+
+```{python}
+crimes_csv = data_dir / "crimes_2011_2018.csv"
+crime_csv["primary type"].unique()
