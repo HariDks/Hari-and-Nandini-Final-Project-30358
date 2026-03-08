@@ -1,0 +1,678 @@
+from pathlib import Path
+import pandas as pd
+import geopandas as gpd
+import numpy as np
+from shapely.geometry import Point
+
+project_dir = Path(__file__).parent
+data_dir = project_dir / "data"
+
+crimes_csv = data_dir / "crimes_2011_2018.csv"
+streetlights_csv = data_dir / "streetlight_chicago.csv"
+tracts_shp = data_dir / "illinois_tract_income" / "illinois_tract_income.shp"
+
+buffers_geojson = data_dir / "streetlight_buffers.geojson"
+events_geojson = data_dir / "streetlight_crime_events.geojson"
+all_crimes_joined_geojson = data_dir / "all_crimes_streetlight_joined.geojson"
+
+# processed outputs for static plots
+ev30_tracts_csv = data_dir / "processed_ev30_tracts.csv"
+tract_agg_csv = data_dir / "processed_tract_agg.csv"
+tc_all_csv = data_dir / "processed_tc_all.csv"
+excess_df_csv = data_dir / "processed_excess_df.csv"
+top_types_csv = data_dir / "processed_top_types.csv"
+outage_days_base_csv = data_dir / "processed_outage_days_base.csv"
+
+street_df = pd.read_csv(streetlights_csv)
+
+if "latitude" not in street_df.columns or "longitude" not in street_df.columns:
+    raise ValueError("streetlight_chicago.csv must contain latitude and longitude columns.")
+
+street_geom = [Point(xy) for xy in zip(street_df["longitude"], street_df["latitude"])]
+street_gdf = gpd.GeoDataFrame(street_df, geometry=street_geom, crs="EPSG:4326").to_crs(epsg=3435)
+
+buffer_sizes = [15, 30, 50]
+buffer_parts = []
+
+for size in buffer_sizes:
+    temp = street_gdf.copy()
+    temp["buffer_radius_m"] = size
+    temp["geometry"] = temp.geometry.buffer(size)
+    buffer_parts.append(temp)
+
+buffers = gpd.GeoDataFrame(pd.concat(buffer_parts, ignore_index=True), crs=street_gdf.crs)
+buffers.to_file(buffers_geojson, driver="GeoJSON")
+
+print("Saved:", buffers_geojson)
+print("Rows:", len(buffers))
+
+buffers = gpd.read_file(buffers_geojson)
+
+if "creation_date" not in buffers.columns and "creating_date" in buffers.columns:
+    buffers = buffers.rename(columns={"creating_date": "creation_date"})
+if "completion_date" not in buffers.columns and "completed_date" in buffers.columns:
+    buffers = buffers.rename(columns={"completed_date": "completion_date"})
+
+needed_buf = {"creation_date", "completion_date", "buffer_radius_m", "geometry", "service_request_number"}
+missing_buf = needed_buf - set(buffers.columns)
+if missing_buf:
+    raise ValueError(f"Missing buffer columns: {missing_buf}")
+
+buffers["creation_date"] = pd.to_datetime(buffers["creation_date"], errors="coerce")
+buffers["completion_date"] = pd.to_datetime(buffers["completion_date"], errors="coerce")
+buffers = buffers.dropna(subset=["creation_date", "completion_date"]).copy()
+
+if buffers.crs is None or buffers.crs.to_epsg() != 3435:
+    buffers = buffers.to_crs(epsg=3435)
+
+buffers["request_id"] = buffers["service_request_number"].astype(str)
+
+crime_df = pd.read_csv(crimes_csv)
+
+needed_crime = {"id", "date", "latitude", "longitude"}
+missing_crime = needed_crime - set(crime_df.columns)
+if missing_crime:
+    raise ValueError(f"Missing crime columns: {missing_crime}")
+
+crime_df["crime_date"] = pd.to_datetime(crime_df["date"], errors="coerce")
+crime_df = crime_df.dropna(subset=["crime_date", "latitude", "longitude"]).copy()
+
+crime_geom = [Point(xy) for xy in zip(crime_df["longitude"], crime_df["latitude"])]
+crime_gdf = gpd.GeoDataFrame(crime_df, geometry=crime_geom, crs="EPSG:4326").to_crs(epsg=3435)
+
+print("Crimes loaded:", len(crime_gdf))
+
+joined = gpd.sjoin(
+    crime_gdf,
+    buffers,
+    how="inner",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+joined["crime_date"] = pd.to_datetime(joined["crime_date"], errors="coerce")
+joined["creation_date"] = pd.to_datetime(joined["creation_date"], errors="coerce")
+joined["completion_date"] = pd.to_datetime(joined["completion_date"], errors="coerce")
+
+joined = joined.dropna(subset=["completion_date"]).copy()
+
+joined["time_to_fix"] = (
+    (joined["completion_date"] - joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+joined["days_from_outage_request"] = (
+    (joined["crime_date"] - joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+# keep only -10 days before to completion
+window_mask = (
+    (joined["days_from_outage_request"] >= -10) &
+    (joined["days_from_outage_request"] <= joined["time_to_fix"])
+)
+joined = joined[window_mask].copy()
+
+joined["crime_streetlight_outage"] = (joined["days_from_outage_request"] >= 0).astype(int)
+joined["crime_outside_outage"] = (joined["crime_streetlight_outage"] == 0).astype(int)
+
+event_cols = [
+    "id", "primary_type", "crime_date", "year",
+    "community_area", "beat", "district", "ward",
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status",
+    "crime_streetlight_outage", "crime_outside_outage",
+    "time_to_fix", "days_from_outage_request",
+    "geometry"
+]
+event_cols = [c for c in event_cols if c in joined.columns]
+joined = joined[event_cols]
+
+joined.to_file(events_geojson, driver="GeoJSON")
+print("Saved:", events_geojson)
+print("Rows:", len(joined))
+
+buffers_30 = buffers[buffers["buffer_radius_m"] == 30].copy()
+
+buf_cols = [
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status", "geometry",
+]
+buf_cols = [c for c in buf_cols if c in buffers_30.columns]
+buffers_30 = buffers_30[buf_cols]
+
+all_joined = gpd.sjoin(
+    crime_gdf,
+    buffers_30,
+    how="left",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+all_joined["creation_date"] = pd.to_datetime(all_joined["creation_date"], errors="coerce")
+all_joined["completion_date"] = pd.to_datetime(all_joined["completion_date"], errors="coerce")
+
+all_joined["days_from_outage_request"] = (
+    (all_joined["crime_date"] - all_joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+all_joined["time_to_fix"] = (
+    (all_joined["completion_date"] - all_joined["creation_date"]).dt.total_seconds() / 86400.0
+)
+
+def outage_flag(row):
+    if pd.isna(row["days_from_outage_request"]) or pd.isna(row["time_to_fix"]):
+        return float("nan")
+    return int(0 <= row["days_from_outage_request"] <= row["time_to_fix"])
+
+all_joined["crime_streetlight_outage"] = all_joined.apply(outage_flag, axis=1)
+
+all_cols = [
+    "id", "primary_type", "crime_date", "year",
+    "community_area", "beat", "district", "ward",
+    "request_id", "service_request_number", "buffer_radius_m",
+    "creation_date", "completion_date", "status",
+    "crime_streetlight_outage", "time_to_fix", "days_from_outage_request",
+    "geometry"
+]
+all_cols = [c for c in all_cols if c in all_joined.columns]
+all_joined = all_joined[all_cols]
+
+all_joined.to_file(all_crimes_joined_geojson, driver="GeoJSON")
+print("Saved:", all_crimes_joined_geojson)
+print("Rows:", len(all_joined))
+
+events = gpd.read_file(events_geojson)
+tracts_gdf = gpd.read_file(tracts_shp)
+
+tracts_gdf = tracts_gdf.to_crs(events.crs)
+
+events["days_from_outage_request"] = pd.to_numeric(events["days_from_outage_request"], errors="coerce")
+events["time_to_fix"] = pd.to_numeric(events["time_to_fix"], errors="coerce")
+events["crime_streetlight_outage"] = pd.to_numeric(events["crime_streetlight_outage"], errors="coerce")
+events["buffer_radius_m"] = pd.to_numeric(events["buffer_radius_m"], errors="coerce")
+events["crime_date"] = pd.to_datetime(events["crime_date"], errors="coerce")
+
+# nighttime only for static analysis
+events = events[events["crime_date"].dt.hour >= 17].copy()
+events = events[events["time_to_fix"] <= 365].copy()
+
+# 30m main analysis sample
+ev30 = events[events["buffer_radius_m"] == 30].copy()
+
+top_types = ev30["primary_type"].value_counts().head(10).index.tolist()
+pd.DataFrame({"crime_type": top_types}).to_csv(top_types_csv, index=False)
+
+ev30 = ev30[ev30["primary_type"].isin(top_types)].copy()
+
+ev30_tracts = gpd.sjoin(
+    ev30[[
+        "request_id", "service_request_number", "crime_streetlight_outage",
+        "time_to_fix", "days_from_outage_request", "primary_type", "geometry"
+    ]],
+    tracts_gdf[["GEOID", "ASQPE001", "geometry"]],
+    how="left",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+ev30_tracts.to_csv(ev30_tracts_csv, index=False)
+print("Saved:", ev30_tracts_csv)
+
+crimes_per_tract = (
+    ev30_tracts.groupby("GEOID")["crime_streetlight_outage"]
+    .sum()
+    .reset_index(name="crimes_during_outage")
+)
+
+ttf_cap = ev30_tracts.drop_duplicates(subset=["request_id"])["time_to_fix"].quantile(0.95)
+ev30_tracts["time_to_fix_w"] = ev30_tracts["time_to_fix"].clip(upper=ttf_cap)
+
+outage_days_per_tract = (
+    ev30_tracts.drop_duplicates(subset=["GEOID", "request_id"])
+    .groupby("GEOID")
+    .agg(
+        n_requests=("request_id", "nunique"),
+        total_outage_days=("time_to_fix_w", "sum"),
+        median_income=("ASQPE001", "first"),
+    )
+    .reset_index()
+)
+
+tract_agg = crimes_per_tract.merge(outage_days_per_tract, on="GEOID")
+tract_agg["crime_per_outage_day"] = (
+    tract_agg["crimes_during_outage"] / tract_agg["total_outage_days"]
+)
+
+tract_agg = tract_agg[tract_agg["median_income"] > 0].copy()
+tract_agg.to_csv(tract_agg_csv, index=False)
+
+print("Saved:", tract_agg_csv)
+print("Rows:", len(tract_agg))
+
+outage_days_base = outage_days_per_tract[
+    ["GEOID", "total_outage_days", "median_income", "n_requests"]
+].copy()
+outage_days_base.to_csv(outage_days_base_csv, index=False)
+print("Saved:", outage_days_base_csv)
+
+def before_during_tract(ev30_tracts_sub, outage_days_df):
+    sym = ev30_tracts_sub[
+        ev30_tracts_sub["days_from_outage_request"].abs() <= ev30_tracts_sub["time_to_fix"]
+    ].copy()
+
+    pre = (
+        sym[sym["crime_streetlight_outage"] == 0]
+        .groupby("GEOID")
+        .size()
+        .reset_index(name="pre_n")
+    )
+
+    dur = (
+        sym[sym["crime_streetlight_outage"] == 1]
+        .groupby("GEOID")
+        .size()
+        .reset_index(name="dur_n")
+    )
+
+    result = outage_days_df.merge(pre, on="GEOID", how="left").merge(dur, on="GEOID", how="left")
+    result["pre_n"] = result["pre_n"].fillna(0)
+    result["dur_n"] = result["dur_n"].fillna(0)
+    result["pre_rate"] = result["pre_n"] / result["total_outage_days"]
+    result["dur_rate"] = result["dur_n"] / result["total_outage_days"]
+    result["rate_change"] = result["dur_rate"] - result["pre_rate"]
+    result["crime_increased"] = result["rate_change"] > 0
+    return result[result["median_income"] > 0].copy()
+
+tc_all = before_during_tract(ev30_tracts, outage_days_base)
+tc_all.to_csv(tc_all_csv, index=False)
+
+print("Saved:", tc_all_csv)
+print("Rows:", len(tc_all))
+
+# choose symmetric window width
+W = 7
+
+ev_sym = ev30[
+    ev30["days_from_outage_request"].abs() <= W
+].copy()
+
+outage_ttf = (
+    ev_sym.drop_duplicates(subset=["service_request_number"])
+    .set_index("service_request_number")["time_to_fix"]
+)
+
+def per_outage_excess(ev_subset, w=W):
+    ev_subset = ev_subset.copy()
+    ev_subset["period"] = np.where(
+        ev_subset["days_from_outage_request"] >= 0,
+        "during",
+        "before"
+    )
+
+    counts = (
+        ev_subset.groupby(["service_request_number", "period"])
+        .size()
+        .unstack(fill_value=0)
+    )
+
+    for col in ["before", "during"]:
+        if col not in counts.columns:
+            counts[col] = 0
+
+    ttf = outage_ttf.reindex(counts.index)
+    counts = counts[ttf.notna()].copy()
+    counts["before_rate"] = counts["before"] / w
+    counts["during_rate"] = counts["during"] / w
+    counts["excess"] = counts["during_rate"] - counts["before_rate"]
+    counts["time_to_fix"] = ttf.reindex(counts.index).values
+    return counts.dropna(subset=["time_to_fix"]).reset_index()
+
+excess_df = per_outage_excess(ev_sym)
+excess_df.to_csv(excess_df_csv, index=False)
+
+print("Saved:", excess_df_csv)
+print("Rows:", len(excess_df))
+
+print("Top crime types:")
+print(top_types)
+
+print("\ntract_agg preview:")
+print(tract_agg.head())
+
+print("\ntc_all preview:")
+print(tc_all.head())
+
+print("\nexcess_df preview:")
+print(excess_df.head())
+
+# Sanity check: unique crime types in the raw data
+crime_df_check = pd.read_csv(data_dir / "crimes_2011_2018.csv", usecols=["primary_type"])
+print(sorted(crime_df_check["primary_type"].dropna().unique()))
+
+# ── Dashboard Data Pipeline ────────────────────────────────────────────────────
+
+# Step 1 — Join events with census tracts
+# Produces:
+#   data/streetlight_crime_events_with_tracts.geojson
+#   data/tract_level_crime_summary.geojson
+
+# Output paths
+with_tracts_geojson  = data_dir / "streetlight_crime_events_with_tracts.geojson"
+tract_summary_geojson = data_dir / "tract_level_crime_summary.geojson"
+
+# Load ALL events (all buffer radii, no time-of-day filter — dashboard uses full dataset)
+events_all = gpd.read_file(events_geojson)
+events_all["days_from_outage_request"] = pd.to_numeric(
+    events_all["days_from_outage_request"], errors="coerce"
+)
+events_all["time_to_fix"] = pd.to_numeric(events_all["time_to_fix"], errors="coerce")
+
+tracts_income = gpd.read_file(tracts_shp).to_crs(events_all.crs)
+
+# Spatial join: each crime point → its containing tract
+joined_tracts = gpd.sjoin(
+    events_all,
+    tracts_income[["GEOID", "NAME", "NAMELSAD", "ASQPE001", "ASQPM001", "geometry"]],
+    how="left",
+    predicate="within",
+).drop(columns=["index_right"], errors="ignore")
+
+joined_tracts = joined_tracts.rename(columns={
+    "GEOID":    "tract_geoid",
+    "NAME":     "tract_name",
+    "NAMELSAD": "tract_namelsad",
+    "ASQPE001": "median_income_estimate",
+    "ASQPM001": "median_income_moe",
+})
+
+joined_tracts.to_file(with_tracts_geojson, driver="GeoJSON")
+print(f"Saved: {with_tracts_geojson}  ({len(joined_tracts):,} rows)")
+print(f"  Matched to tract: {joined_tracts['tract_geoid'].notna().sum():,}")
+
+# Tract-level summary with polygon geometry (for dashboard base map)
+tract_agg_dash = (
+    joined_tracts.groupby("tract_geoid").agg(
+        total_crime_events      =("id", "count"),
+        unique_crimes           =("id", "nunique"),
+        crimes_during_outage    =("crime_streetlight_outage", "sum"),
+        median_income_estimate  =("median_income_estimate", "first"),
+        tract_name              =("tract_name", "first"),
+    ).reset_index()
+)
+
+tract_polys = (
+    tracts_income[["GEOID", "geometry"]]
+    .rename(columns={"GEOID": "tract_geoid"})
+    .assign(tract_geoid=lambda d: d["tract_geoid"].astype(str))
+)
+tract_summary = gpd.GeoDataFrame(
+    tract_polys.merge(tract_agg_dash, on="tract_geoid", how="inner"),
+    geometry="geometry",
+    crs=events_all.crs,
+)
+tract_summary.to_file(tract_summary_geojson, driver="GeoJSON")
+print(f"Saved: {tract_summary_geojson}  ({len(tract_summary):,} tracts)")
+
+# Step 2 — Chicago tract base GeoJSON
+# Creates chicago_streetlights_tract_data.geojson
+
+chi_tracts_geojson = Path(project_dir) / "chicago_streetlights_tract_data.geojson"
+
+if not chi_tracts_geojson.exists():
+    # Derive tract_geoid from GISJOIN and filter to Chicago tracts
+    chi_ref = gpd.read_file(tract_summary_geojson)[["tract_geoid"]].copy()
+    chicago_geoids = set(chi_ref["tract_geoid"].astype(str))
+
+    all_il_tracts = gpd.read_file(tracts_shp)
+    all_il_tracts["tract_geoid"] = (
+        all_il_tracts["GISJOIN"].str[1:3]
+        + all_il_tracts["GISJOIN"].str[4:7]
+        + all_il_tracts["GISJOIN"].str[8:]
+    )
+    chi_base = all_il_tracts[all_il_tracts["tract_geoid"].isin(chicago_geoids)].copy()
+    chi_base.to_file(chi_tracts_geojson, driver="GeoJSON")
+    print(f"Created base file: {chi_tracts_geojson}  ({len(chi_base)} tracts)")
+else:
+    print(f"Already exists: {chi_tracts_geojson} — skipping.")
+
+# Step 3 — Streetlight counts + weekly crime-outage panel
+# Produces:
+#   chicago_streetlights_tract_data.csv / .geojson
+#   tract_day_crime_outage_panel.csv
+#   tract_week_crime_outage_panel.csv
+
+# ── Section 3a: Streetlight count per tract ────────────────────────────────────
+
+chi_tracts_csv = project_dir / "chicago_streetlights_tract_data.csv"
+tract_day_panel_csv = project_dir / "tract_day_crime_outage_panel.csv"
+tract_week_panel_csv = project_dir / "tract_week_crime_outage_panel.csv"
+transportation_geojson = data_dir / "transportation_20260307.geojson"
+
+print("Loading census tract GeoJSON...")
+tracts_sl = gpd.read_file(chi_tracts_geojson)
+
+# Drop any previously computed columns so merges don't conflict
+drop_cols = [c for c in ["streetlight_count", "streetlight_count_raw", "streetlight_count_est", "tract_geoid"] if c in tracts_sl.columns]
+tracts_sl = tracts_sl.drop(columns=drop_cols)
+
+# Raw count from unique outage locations
+print("Loading raw streetlight CSV...")
+lights_raw = pd.read_csv(
+    data_dir / "streetlight_chicago.csv",
+    usecols=["latitude", "longitude"],
+    dtype={"latitude": float, "longitude": float},
+)
+lights_raw = lights_raw.dropna(subset=["latitude", "longitude"])
+lights_unique = lights_raw.drop_duplicates(subset=["latitude", "longitude"])
+print(f"  Unique lat/lon locations: {len(lights_unique):,}")
+
+lights_gdf = gpd.GeoDataFrame(
+    lights_unique,
+    geometry=gpd.points_from_xy(lights_unique["longitude"], lights_unique["latitude"]),
+    crs="EPSG:4326",
+).to_crs(tracts_sl.crs)
+
+print("Spatial joining streetlights to tracts...")
+sl_joined = gpd.sjoin(lights_gdf, tracts_sl[["GISJOIN", "geometry"]], predicate="within", how="inner")
+counts_raw = sl_joined.groupby("GISJOIN").size().reset_index(name="streetlight_count_raw")
+
+tracts_sl = tracts_sl.merge(counts_raw, on="GISJOIN", how="left")
+tracts_sl["streetlight_count_raw"] = tracts_sl["streetlight_count_raw"].fillna(0).astype(int)
+
+# Street-length estimate
+SPACING_M = {"1": 60, "2": 24, "3": 32, "4": 38, "E": 60, "S": 50}
+
+print("Loading transportation network...")
+streets = gpd.read_file(transportation_geojson)
+streets_utm = streets.to_crs(epsg=26916)
+streets_utm["length_m"] = streets_utm.geometry.length
+streets_utm["spacing"] = streets_utm["class"].astype(str).map(SPACING_M)
+streets_utm["lights_est"] = (streets_utm["length_m"] / streets_utm["spacing"]).fillna(0)
+
+streets_utm["centroid"] = streets_utm.geometry.centroid
+streets_centroids = streets_utm.set_geometry("centroid").to_crs(tracts_sl.crs)
+
+print("Spatial joining street segments to tracts...")
+tracts_proj = tracts_sl[["GISJOIN", "geometry"]].to_crs(streets_centroids.crs)
+seg_joined = gpd.sjoin(streets_centroids[["lights_est", "centroid"]], tracts_proj, predicate="within", how="inner")
+counts_est = seg_joined.groupby("GISJOIN")["lights_est"].sum().reset_index(name="streetlight_count_est")
+counts_est["streetlight_count_est"] = counts_est["streetlight_count_est"].round().astype(int)
+
+tracts_sl = tracts_sl.merge(counts_est, on="GISJOIN", how="left")
+tracts_sl["streetlight_count_est"] = tracts_sl["streetlight_count_est"].fillna(0).astype(int)
+tracts_sl["streetlight_count"] = tracts_sl["streetlight_count_raw"]
+
+tracts_sl["tract_geoid"] = tracts_sl["GISJOIN"].str[1:3] + tracts_sl["GISJOIN"].str[4:7] + tracts_sl["GISJOIN"].str[8:]
+
+chicago_ref = gpd.read_file(tract_summary_geojson)
+chicago_geoids_sl = set(chicago_ref["tract_geoid"])
+chi_sl = tracts_sl[tracts_sl["tract_geoid"].isin(chicago_geoids_sl)]
+
+print("\n--- Streetlight count comparison (Chicago tracts) ---")
+for label, col in [("Raw (outage requests)", "streetlight_count_raw"),
+                   ("Estimate (street length)", "streetlight_count_est")]:
+    s = chi_sl[col]
+    print(f"  [{label}]  min={s.min()}  max={s.max()}  mean={s.mean():.1f}  total={s.sum():,}")
+
+print("\nSaving tract-level outputs...")
+tracts_sl.to_file(chi_tracts_geojson, driver="GeoJSON")
+tracts_sl.drop(columns="geometry").to_csv(chi_tracts_csv, index=False)
+print(f"Saved: {chi_tracts_geojson}")
+print(f"Saved: {chi_tracts_csv}")
+
+# ── Section 3b: Tract × day crime-outage panel ────────────────────────────────
+
+CRIME_START = pd.Timestamp("2011-01-01").date()
+CRIME_END = pd.Timestamp("2018-12-31").date()
+
+print("\n\n=== TRACT x DAY CRIME-OUTAGE PANEL ===")
+print("Loading outage records with dates...")
+outages_raw = pd.read_csv(
+    data_dir / "streetlight_chicago.csv",
+    usecols=["creation_date", "completion_date", "latitude", "longitude"],
+)
+outages_raw = outages_raw.dropna(subset=["latitude", "longitude", "creation_date"])
+outages_raw["completion_date"] = outages_raw["completion_date"].fillna("2018-12-31T00:00:00.000")
+outages_raw["creation_date"] = pd.to_datetime(outages_raw["creation_date"]).dt.date
+outages_raw["completion_date"] = pd.to_datetime(outages_raw["completion_date"]).dt.date
+
+outages_raw = outages_raw[
+    (outages_raw["completion_date"] >= CRIME_START) &
+    (outages_raw["creation_date"] <= CRIME_END)
+].reset_index(drop=True)
+print(f"  Outages overlapping 2011-2018: {len(outages_raw):,}")
+
+outage_gdf_p = gpd.GeoDataFrame(
+    outages_raw,
+    geometry=gpd.points_from_xy(outages_raw["longitude"], outages_raw["latitude"]),
+    crs="EPSG:4326",
+)
+outage_gdf_p["outage_id"] = outage_gdf_p.index
+
+print("  Spatial joining outages to tracts...")
+outage_proj_p = outage_gdf_p.to_crs(tracts_sl.crs)
+outage_tract_p = gpd.sjoin(
+    outage_proj_p[["outage_id", "creation_date", "completion_date", "geometry"]],
+    tracts_sl[["GISJOIN", "geometry"]],
+    predicate="within",
+    how="inner",
+)[["outage_id", "GISJOIN", "creation_date", "completion_date"]].drop_duplicates("outage_id")
+print(f"  Outages assigned to tracts: {len(outage_tract_p):,}")
+
+print("\nLoading crime data...")
+crimes_raw_p = pd.read_csv(
+    crimes_csv,
+    usecols=["id", "date", "primary_type", "latitude", "longitude"],
+)
+crimes_raw_p = crimes_raw_p.dropna(subset=["latitude", "longitude"]).rename(columns={"id": "crime_id"})
+crimes_raw_p["date"] = pd.to_datetime(crimes_raw_p["date"]).dt.date
+print(f"  Crimes with valid coords: {len(crimes_raw_p):,}")
+
+crime_gdf_p = gpd.GeoDataFrame(
+    crimes_raw_p.reset_index(drop=True),
+    geometry=gpd.points_from_xy(crimes_raw_p["longitude"], crimes_raw_p["latitude"]),
+    crs="EPSG:4326",
+)
+
+print("  Spatial joining crimes to tracts...")
+crime_proj_p = crime_gdf_p.to_crs(tracts_sl.crs)
+crime_tract_p = gpd.sjoin(
+    crime_proj_p[["crime_id", "date", "primary_type", "geometry"]],
+    tracts_sl[["GISJOIN", "geometry"]],
+    predicate="within",
+    how="inner",
+)[["crime_id", "date", "primary_type", "GISJOIN"]].drop_duplicates("crime_id")
+print(f"  Crimes assigned to tracts: {len(crime_tract_p):,}")
+
+print("\nBuilding 30m outage buffers and joining crimes...")
+outage_utm_p = outage_gdf_p.to_crs(epsg=26916).copy()
+outage_utm_p["geometry"] = outage_utm_p.geometry.buffer(50)
+outage_buffers_p = outage_utm_p[["outage_id", "creation_date", "completion_date", "geometry"]]
+
+crime_utm_p = crime_gdf_p[["crime_id", "date", "geometry"]].to_crs(epsg=26916)
+
+print("  Spatial join (crimes → outage buffers)...")
+buf_join_p = gpd.sjoin(crime_utm_p, outage_buffers_p, predicate="within", how="inner")
+
+print("  Temporal filter...")
+c_date_p = pd.to_datetime(buf_join_p["date"])
+o_start_p = pd.to_datetime(buf_join_p["creation_date"])
+o_end_p = pd.to_datetime(buf_join_p["completion_date"])
+active_matches_p = buf_join_p[(c_date_p >= o_start_p) & (c_date_p <= o_end_p)]
+inside_ids_p = set(active_matches_p["crime_id"].unique())
+print(f"  Crimes inside an active outage buffer: {len(inside_ids_p):,}")
+
+crime_tract_p = crime_tract_p.copy()
+crime_tract_p["inside_buffer"] = crime_tract_p["crime_id"].isin(inside_ids_p)
+
+print("\nComputing active outages per tract-day (numpy broadcasting)...")
+
+def to_epoch_days(s):
+    return pd.to_datetime(s).astype("int64") // (86_400 * 10**9)
+
+tract_day_p = crime_tract_p.groupby(["GISJOIN", "date"]).size().reset_index(name="total_crimes")
+tract_day_p["date_int"] = to_epoch_days(pd.to_datetime(tract_day_p["date"]))
+
+outage_tract_p = outage_tract_p.copy()
+outage_tract_p["start_int"] = to_epoch_days(pd.to_datetime(outage_tract_p["creation_date"]))
+outage_tract_p["end_int"] = to_epoch_days(pd.to_datetime(outage_tract_p["completion_date"]))
+
+active_rows_p = []
+for gisjoin, td_grp in tract_day_p.groupby("GISJOIN"):
+    out_grp = outage_tract_p[outage_tract_p["GISJOIN"] == gisjoin]
+    td_grp = td_grp.copy()
+    if len(out_grp) == 0:
+        td_grp["active_outages"] = 0
+    else:
+        dates = td_grp["date_int"].values
+        starts = out_grp["start_int"].values
+        ends = out_grp["end_int"].values
+        td_grp["active_outages"] = ((dates[:, None] >= starts) & (dates[:, None] <= ends)).sum(axis=1)
+    active_rows_p.append(td_grp[["GISJOIN", "date", "active_outages"]])
+
+active_df_p = pd.concat(active_rows_p, ignore_index=True)
+
+print("Aggregating panel...")
+base_p = crime_tract_p.groupby(["GISJOIN", "date"]).agg(
+    total_crimes=("crime_id", "count"),
+    crimes_inside=("inside_buffer", "sum"),
+).reset_index()
+base_p["crimes_outside"] = base_p["total_crimes"] - base_p["crimes_inside"].astype(int)
+base_p["crimes_inside"] = base_p["crimes_inside"].astype(int)
+
+type_inside_p = (
+    crime_tract_p[crime_tract_p["inside_buffer"]]
+    .groupby(["GISJOIN", "date", "primary_type"]).size().reset_index(name="n")
+    .pivot_table(index=["GISJOIN", "date"], columns="primary_type", values="n", fill_value=0)
+)
+type_inside_p.columns = [f"{c.lower().replace(' ', '_').replace('/', '_')}_inside" for c in type_inside_p.columns]
+type_inside_p = type_inside_p.reset_index()
+
+type_outside_p = (
+    crime_tract_p[~crime_tract_p["inside_buffer"]]
+    .groupby(["GISJOIN", "date", "primary_type"]).size().reset_index(name="n")
+    .pivot_table(index=["GISJOIN", "date"], columns="primary_type", values="n", fill_value=0)
+)
+type_outside_p.columns = [f"{c.lower().replace(' ', '_').replace('/', '_')}_outside" for c in type_outside_p.columns]
+type_outside_p = type_outside_p.reset_index()
+
+panel_p = (
+    base_p
+    .merge(active_df_p[["GISJOIN", "date", "active_outages"]], on=["GISJOIN", "date"], how="left")
+    .merge(type_inside_p, on=["GISJOIN", "date"], how="left")
+    .merge(type_outside_p, on=["GISJOIN", "date"], how="left")
+)
+panel_p["active_outages"] = panel_p["active_outages"].fillna(0).astype(int)
+type_cols_p = [c for c in panel_p.columns if c.endswith("_inside") or c.endswith("_outside")]
+panel_p[type_cols_p] = panel_p[type_cols_p].fillna(0).astype(int)
+
+print(f"\n  Panel shape:       {panel_p.shape}")
+print(f"  Unique tract-days: {len(panel_p):,}")
+print(f"  Date range:        {panel_p['date'].min()} to {panel_p['date'].max()}")
+print(f"  Columns:           {list(panel_p.columns[:8])} ...")
+
+panel_p.to_csv(tract_day_panel_csv, index=False)
+print(f"\nSaved: {tract_day_panel_csv}")
+
+count_cols_p = [c for c in panel_p.columns if c not in ["GISJOIN", "date"]]
+panel_p["week"] = pd.to_datetime(panel_p["date"]).dt.to_period("W-MON").dt.start_time.dt.date
+panel_week_p = panel_p.groupby(["GISJOIN", "week"])[count_cols_p].sum().reset_index()
+
+panel_week_p.to_csv(tract_week_panel_csv, index=False)
+print(f"Saved: {tract_week_panel_csv}  ({len(panel_week_p):,} tract-weeks, {panel_week_p['week'].nunique()} weeks)")
