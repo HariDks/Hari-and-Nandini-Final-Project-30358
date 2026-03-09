@@ -61,6 +61,7 @@ Reads from `data/raw_data/`, writes all outputs to `data/derived_data/`. Key ste
 4. Assign census tract GEOIDs to all events via spatial join with Illinois tract shapefile
 5. Aggregate to tract-week panel with outage rates and crime counts
 6. Compute pre/during crime rate metrics using symmetric windows
+7. Load the Chicago transportation network (`transportation_*.geojson`) and impute streetlight counts per tract using road-class-based spacing (e.g. 24 m for local roads, 60 m for expressways). Each street segment's length is divided by its class spacing to estimate the number of lights, then summed per tract. A raw count from unique outage locations is also computed for comparison. Both are saved in `chicago_streetlights_tract_data.csv/.geojson` and used by the dashboard.
 
 See `code/preprocessing.qmd` for a fully annotated walkthrough of each step.
 

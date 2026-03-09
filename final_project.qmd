@@ -1,0 +1,99 @@
+---
+title: "Crime Patterns Around Streetlight Service Requests in Chicago"
+author:
+  - "Hari Dharshini Koundinya Swaminathen"
+  - "Nandini Krishnan"
+format:
+  html:
+    self-contained: true
+    include-in-header:
+      text: |
+        <style>
+        h2 { margin-top: 8px; margin-bottom: 3px; }
+        .viz-row { display: flex; gap: 16px; align-items: flex-start; margin-bottom: 10px; }
+        .viz-text { flex: 1.1; }
+        .viz-img { flex: 1; }
+        .viz-img img { width: 100%; }
+        </style>
+  pdf:
+    documentclass: article
+    geometry: "margin=0.75in, top=0.65in, bottom=0.65in"
+    include-in-header:
+      text: |
+        \usepackage{titlesec}
+        \usepackage{enumitem}
+        \titlespacing*{\section}{0pt}{5pt}{2pt}
+        \setlist{nosep, topsep=0pt}
+        \setlength{\parskip}{2pt}
+---
+
+**Lecture Section:** Tuesday 11:00–12:20 | **GitHub Usernames:** HariDks, nandinikrishnan1
+
+## **Research Question and Motivation**
+
+Urban infrastructure failures may influence patterns of public safety and one such infrastructure component is street lighting. When streetlights outages occur, the resulting darkness reduces visibility and creates opportunities for offenders. This project aims to study if the presence and duration of streetlight outages affect nearby crime patterns in Chicago. We examine three aspects of this relationship: (1) Whether crime rates change in areas near streetlight outages. (2) Whether longer outages are associated with greater crime exposure. (3) Whether outage-related crime changes vary across neighborhoods with different income levels. Understanding these relationships, we create a dashboard and policy tool which will help policymakers allocate infrastructure maintenance and law enforcement resources more effectively.
+
+---
+
+## **Data Sources**
+
+To study the relationship between streetlight outages and crime, we combined three main datasets. The first dataset is the City of Chicago crime dataset (2011–2018) containing incident-level geocoded records of crimes reported in the city categorized by type. The second dataset is Chicago 311 streetlight service request data from the same period. These records contain the location of the outage and the time the complaint was filed. From this we calculated the duration of each outage. The third dataset is the Illinois census tract shapefile, which provides tract boundaries along with ACS 2011 census demographics data. This dataset allows us to analyse whether the effects of streetlight outages on crime vary across neighborhoods. By combining these three datasets, we were able to study both the spatial and temporal relationship between streetlight outages and nearby crime incidents.
+
+---
+
+## **Approach and Coding**
+
+The analysis was carried out using Python, the packages we used can be found in the requirements.txt file. First, all spatial datasets were projected into the EPSG:3435 coordinate system, which allows distances to be measured accurately in meters. After this, we created spatial buffers of 30m around each streetlight outage location. Crimes that occurred within this buffer distance during nighttime hours were considered relevant to the outage. Next, we constructed an event-time variable which measures the number of days between the crime date and the streetlight complaint date. Using this variable, we compared crimes that occurred before the outage with crimes that occurred during the outage. We used symmetric time windows so that the comparison period before the outage was equal to the period during the outage.
+Instead of analysing raw crime counts, we calculated crime rates per outage-day. This allowed us to compare outages with different durations more consistently. Using these rates, we calculated excess crime, which represents the difference between the crime rate during the outage and the crime rate before the outage. From this process, we created three main datasets: (1) measuring changes in crime composition by offense type, (2) capturing tract-level crime rate changes combined with income data, and (3) grouping outages into duration categories to study how crime exposure changes as outages last longer.
+
+---
+
+## **Static Visualizations**
+
+::: {.content-visible when-format="pdf"}
+```{=latex}
+\noindent\begin{minipage}[t]{0.50\linewidth}
+The first visualization focuses on \textbf{changes in crime composition during outages}. Using the symmetric time window (same number of days during and pre outage), we compared crimes before outages with those that occurred during outages for each crime category. Total crime increases during outage periods. However, crimes such as \textbf{narcotics and robbery show the largest increases}, while burglary decreases relative to its baseline.
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/crime_composition.png}
+\end{minipage}
+
+\vspace{6pt}
+
+\noindent\begin{minipage}[t]{0.50\linewidth}
+After finding a positive correlation between outages and increased crime, we sought tract-level demographic predictors to inform a policy tool. The second visualization is a \textbf{bivariate map combining income levels and crime changes across census tracts}. This map shows that outage-related crime increases are \textbf{not concentrated in lower-income neighborhoods}. We find no strong correlation between income or other tract-level variables and crime increases during outages.
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\linewidth}
+\centering
+\includegraphics[width=\linewidth]{figures/chloropleth.png}
+\end{minipage}
+```
+:::
+
+::: {.content-visible when-format="html"}
+<div class="viz-row">
+<div class="viz-text">The first visualization focuses on **changes in crime composition during outages**. Using the symmetric time window (same number of days during and pre outage), we compared crimes before outages with those that occurred during outages for each crime category. Total crime increases during outage periods. However, crimes such as **narcotics and robbery show the largest increases**, while burglary decreases relative to its baseline.</div>
+<div class="viz-img"><img src="figures/crime_composition.png"/></div>
+</div>
+
+<div class="viz-row">
+<div class="viz-text">After finding a positive correlation between outages and increased crime, we sought tract-level demographic predictors to inform a policy tool. The second visualization is a **bivariate map combining income levels and crime changes across census tracts**. This map shows that outage-related crime increases are **not concentrated in lower-income neighborhoods**. We find no strong correlation between income or other tract-level variables and crime increases during outages.</div>
+<div class="viz-img"><img src="figures/chloropleth.png"/></div>
+</div>
+:::
+
+---
+
+## **Streamlit Dashboard**
+
+In addition to the static visualizations, we developed an interactive **Streamlit dashboard** as our policy tool. The dashboard contains several pages highlighting different aspects of the analysis. The **Overview page** displays a map showing active streetlight outages and crimes on a selected day. Users can select a date and zoom into specific census tracts to view outage locations and crime incidents giving the user a sneak peak into our data. The **Crime Impact page** compares crime rates before and during streetlight outages using spatial buffers around each outage location. It also includes a scatter plot showing correlations between census tract characteristics and changes in crime rates. Users browse this page to understand the tract level variation in changes in crime rates and streetlight outages.
+
+The following two pages are our policy tool: using historic data we employ a rolling regression analysis to predict the crime rates in every census tract. The pages spatially plot the tracts with highest positive deviation from its predicted crime rate. This gives a snapshot of tracts which are becoming hotspots and need to be addressed sooner. The Hotspot Analysis page identifies census tracts where crime near outages is higher than expected based on historical patterns. The Law Enforcement Dashboard further breaks this down by crime type to highlight areas experiencing unusually high crime during outages which can be used by specific law enforcement divisions.
+
+---
+
+## **Weaknesses and Difficulties**
+
+While conducting the analysis, we encountered several challenges. One challenge was integrating multiple datasets with different coordinate systems and formats. Ensuring that all datasets were properly aligned spatially required careful data cleaning and projection. Another limitation is that the analysis relies on **reported crime data**, which may not fully capture all criminal activity. Changes in reporting behavior could influence the observed patterns. Additionally, the spatial buffer approach assumes that crimes occurring within **30 meters of a streetlight outage** are influenced by the outage. In reality, crime patterns are influenced by many other factors. We also do not have a complete geocoded inventory of all streetlights; counts per tract were instead imputed from the road network using road-class-based spacing (e.g. 24 m for local roads, 60 m for expressways), which introduces measurement error. Despite these limitations, the analysis provides useful insights into how infrastructure failures such as streetlight outages may relate to changes in local crime patterns.
