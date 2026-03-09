@@ -107,36 +107,45 @@ CRIME_TYPES = [
 ]
 
 # ─── Data loaders ─────────────────────────────────────────────────────────────
-@st.cache_resource
 def load_data():
     gdf = gpd.read_file(_DERIVED / "streetlight_crime_events_with_tracts.geojson")
     tract_polys = (
         gpd.read_file(_DERIVED / "tract_level_crime_summary.geojson")[["tract_geoid", "geometry"]]
         .to_crs(epsg=4326)
     )
+
     pts_wgs = gdf.to_crs(epsg=4326)
     gdf = gdf.copy()
     gdf["lng"] = pts_wgs.geometry.x
     gdf["lat"] = pts_wgs.geometry.y
+
     df = pd.DataFrame(gdf.drop(columns="geometry"))
+
     df["creation_date"]   = pd.to_datetime(df["creation_date"])
     df["completion_date"] = pd.to_datetime(df["completion_date"])
     df["crime_date"]      = pd.to_datetime(df["crime_date"])
 
-    # Streetlight point locations — small lookup (only requests in our events dataset)
+    # Streetlight point locations
     relevant_ids = set(df["request_id"].dropna().unique())
+
     sl_csv = pd.read_csv(
-        _RAW / "streetlight_chicago.csv",
+        "https://drive.google.com/uc?export=download&id=1xXD7MfVM1uECP2wtZWfHenNuq8IyO7lm",
         usecols=["service_request_number", "latitude", "longitude"],
         dtype={"service_request_number": str},
     )
+
     sl_csv = sl_csv.dropna(subset=["latitude", "longitude"]).rename(
-        columns={"service_request_number": "request_id",
-                 "latitude": "sl_lat", "longitude": "sl_lng"}
+        columns={
+            "service_request_number": "request_id",
+            "latitude": "sl_lat",
+            "longitude": "sl_lng",
+        }
     )
+
     sl_locs = sl_csv[sl_csv["request_id"].isin(relevant_ids)].drop_duplicates("request_id")
 
     crime_types = sorted(df["primary_type"].dropna().unique())
+
     return df, tract_polys, sl_locs, crime_types
 
 
