@@ -291,46 +291,55 @@ def get_crime_type_cols():
 
 @st.cache_data
 def load_nhgis_census() -> pd.DataFrame:
-    """
-    Load ACS 2011-2015 census variables for Chicago tracts from the NHGIS file.
-    Returns a DataFrame indexed by tract_geoid with derived rate columns.
-    """
+
     keep = [
         "GISJOIN",
-        "ADKWE001",                                     # total population
-        "ADKXE001","ADKXE002","ADKXE003",               # race: total, white, black
-        "ADMZE001",                                     # education: 25+ total
-        "ADMZE002","ADMZE003","ADMZE004","ADMZE005",    # no schooling … 4th grade
+        "ADKWE001",
+        "ADKXE001","ADKXE002","ADKXE003",
+        "ADMZE001",
+        "ADMZE002","ADMZE003","ADMZE004","ADMZE005",
         "ADMZE006","ADMZE007","ADMZE008","ADMZE009",
         "ADMZE010","ADMZE011","ADMZE012","ADMZE013",
-        "ADMZE014","ADMZE015","ADMZE016",               # 11th / 12th no diploma
-        "ADMZE017","ADMZE018",                          # HS diploma / GED
-        "ADMZE019","ADMZE020","ADMZE021",               # some college
-        "ADMZE022","ADMZE023","ADMZE024","ADMZE025",    # bachelor's+
-        "ADPIE001","ADPIE002","ADPIE003",               # employment: total, LF, civilian LF
-        "ADPIE004","ADPIE005","ADPIE007",               # employed, unemployed, not in LF
+        "ADMZE014","ADMZE015","ADMZE016",
+        "ADMZE017","ADMZE018",
+        "ADMZE019","ADMZE020","ADMZE021",
+        "ADMZE022","ADMZE023","ADMZE024","ADMZE025",
+        "ADPIE001","ADPIE002","ADPIE003",
+        "ADPIE004","ADPIE005","ADPIE007",
         "STATE",
     ]
-    df = pd.read_csv(_RAW / "nhgis0001_csv/nhgis0001_ds215_20155_tract.csv",
-                     usecols=keep)
+
+    df = pd.read_csv(
+        "https://drive.google.com/uc?export=download&id=1WaiWZD1l6JUP24ZAO3nnzIpPBYKNRwTX",
+        usecols=keep
+    )
+
     df = df[df["STATE"] == "Illinois"].copy()
+
     df["tract_geoid"] = df["GISJOIN"].str[1:3] + df["GISJOIN"].str[4:7] + df["GISJOIN"].str[8:]
 
     no_hs_cols = [f"ADMZE{str(i).zfill(3)}" for i in range(2, 17)]
-    df["pct_no_hs"]        = df[no_hs_cols].sum(axis=1) / df["ADMZE001"].replace(0, np.nan)
-    df["pct_hs_diploma"]   = (df["ADMZE017"] + df["ADMZE018"]) / df["ADMZE001"].replace(0, np.nan)
-    df["pct_some_college"] = (df["ADMZE019"] + df["ADMZE020"] + df["ADMZE021"]) / df["ADMZE001"].replace(0, np.nan)
-    df["pct_bachelors"]    = (df["ADMZE022"] + df["ADMZE023"] + df["ADMZE024"] + df["ADMZE025"]) / df["ADMZE001"].replace(0, np.nan)
-    df["pct_black"]        = df["ADKXE003"] / df["ADKXE001"].replace(0, np.nan)
-    df["pct_white"]        = df["ADKXE002"] / df["ADKXE001"].replace(0, np.nan)
-    df["unemployment_rate"]= df["ADPIE005"] / df["ADPIE003"].replace(0, np.nan)
-    df["pct_not_in_lf"]   = df["ADPIE007"] / df["ADPIE001"].replace(0, np.nan)
-    df["lf_participation"] = df["ADPIE002"] / df["ADPIE001"].replace(0, np.nan)
-    df["population"]       = df["ADKWE001"]
 
-    out_cols = ["tract_geoid", "population", "pct_black", "pct_white",
-                "pct_no_hs", "pct_hs_diploma", "pct_some_college", "pct_bachelors",
-                "unemployment_rate", "pct_not_in_lf", "lf_participation"]
+    df["pct_no_hs"] = df[no_hs_cols].sum(axis=1) / df["ADMZE001"].replace(0, np.nan)
+    df["pct_hs_diploma"] = (df["ADMZE017"] + df["ADMZE018"]) / df["ADMZE001"].replace(0, np.nan)
+    df["pct_some_college"] = (df["ADMZE019"] + df["ADMZE020"] + df["ADMZE021"]) / df["ADMZE001"].replace(0, np.nan)
+    df["pct_bachelors"] = (df["ADMZE022"] + df["ADMZE023"] + df["ADMZE024"] + df["ADMZE025"]) / df["ADMZE001"].replace(0, np.nan)
+
+    df["pct_black"] = df["ADKXE003"] / df["ADKXE001"].replace(0, np.nan)
+    df["pct_white"] = df["ADKXE002"] / df["ADKXE001"].replace(0, np.nan)
+
+    df["unemployment_rate"] = df["ADPIE005"] / df["ADPIE003"].replace(0, np.nan)
+    df["pct_not_in_lf"] = df["ADPIE007"] / df["ADPIE001"].replace(0, np.nan)
+    df["lf_participation"] = df["ADPIE002"] / df["ADPIE001"].replace(0, np.nan)
+
+    df["population"] = df["ADKWE001"]
+
+    out_cols = [
+        "tract_geoid","population","pct_black","pct_white",
+        "pct_no_hs","pct_hs_diploma","pct_some_college","pct_bachelors",
+        "unemployment_rate","pct_not_in_lf","lf_participation"
+    ]
+
     return df[out_cols].set_index("tract_geoid")
 
 
