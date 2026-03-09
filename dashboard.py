@@ -123,7 +123,7 @@ def load_data():
     # Streetlight point locations — small lookup (only requests in our events dataset)
     relevant_ids = set(df["request_id"].dropna().unique())
     sl_csv = pd.read_csv(
-        _HERE / "data/streetlights_chicago.csv",
+        _HERE / "data/streetlight_chicago.csv",
         usecols=["service_request_number", "latitude", "longitude"],
         dtype={"service_request_number": str},
     )

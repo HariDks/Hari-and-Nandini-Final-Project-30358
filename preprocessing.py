@@ -412,7 +412,7 @@ print(f"Saved: {tract_summary_geojson}  ({len(tract_summary):,} tracts)")
 # Step 2 — Chicago tract base GeoJSON
 # Creates chicago_streetlights_tract_data.geojson
 
-chi_tracts_geojson = Path(project_dir) / "chicago_streetlights_tract_data.geojson"
+chi_tracts_geojson = data_dir / "chicago_streetlights_tract_data.geojson"
 
 if not chi_tracts_geojson.exists():
     # Derive tract_geoid from GISJOIN and filter to Chicago tracts
@@ -439,10 +439,17 @@ else:
 
 # ── Section 3a: Streetlight count per tract ────────────────────────────────────
 
-chi_tracts_csv = project_dir / "chicago_streetlights_tract_data.csv"
-tract_day_panel_csv = project_dir / "tract_day_crime_outage_panel.csv"
-tract_week_panel_csv = project_dir / "tract_week_crime_outage_panel.csv"
-transportation_geojson = data_dir / "transportation_20260307.geojson"
+chi_tracts_csv = data_dir / "chicago_streetlights_tract_data.csv"
+tract_day_panel_csv = data_dir / "tract_day_crime_outage_panel.csv"
+tract_week_panel_csv = data_dir / "tract_week_crime_outage_panel.csv"
+transportation_matches = sorted(data_dir.glob("transportation_*.geojson"))
+if not transportation_matches:
+    raise FileNotFoundError(
+        f"No transportation_*.geojson file found in {data_dir}. "
+        "Download it and place it there."
+    )
+transportation_geojson = transportation_matches[-1]  # use most recent if multiple
+print(f"Using transportation file: {transportation_geojson.name}")
 
 print("Loading census tract GeoJSON...")
 tracts_sl = gpd.read_file(chi_tracts_geojson)

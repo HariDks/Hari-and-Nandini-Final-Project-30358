@@ -228,6 +228,8 @@ QUAD_COLORS = {
 ("high_inc","crime_up"): "#7b3294"
 }
 
+tracts_gdf["GEOID"] = tracts_gdf["GEOID"].astype(str)
+tc_all["GEOID"] = tc_all["GEOID"].astype(str)
 tracts = tracts_gdf.merge(tc_all,on="GEOID",how="inner")
 
 tracts["quad_color"] = tracts.apply(
