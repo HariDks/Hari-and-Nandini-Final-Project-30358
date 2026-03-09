@@ -10,4 +10,4 @@ shapely
 sodapy
 streamlit>=1.36
 altair==4.2.2
-statsmodel
+statsmodels==0.14.2
