@@ -9,3 +9,4 @@ scipy
 shapely
 sodapy
 streamlit
+altair
