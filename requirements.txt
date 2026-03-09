@@ -8,5 +8,5 @@ pydeck
 scipy
 shapely
 sodapy
-streamlit
+streamlit>=1.36
 altair==4.2.2
