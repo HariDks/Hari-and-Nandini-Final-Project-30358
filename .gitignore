@@ -1,6 +1,9 @@
 # ignore raw data (large downloaded files)
 data/raw_data/*
 
+# allow this specific dataset for the dashboard
+!data/raw_data/streetlight_chicago.csv
+
 # allow this dataset
 !data/raw_data/streetlight_chicago.csv
 
