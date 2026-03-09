@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    #vis.vega-embed {
+      width: 100%;
+      display: flex;
+    }
+
+    #vis.vega-embed details,
+    #vis.vega-embed details summary {
+      position: relative;
+    }
+  </style>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-lite@5.20.1"></script>
+  <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+</head>
+<body>
+  <div id="vis"></div>
+  <script>
+    (function(vegaEmbed) {
+      var spec = {"config": {"view": {"continuousWidth": 300, "continuousHeight": 300, "stroke": null}, "axis": {"grid": false}}, "layer": [{"data": {"name": "data-d285a7403ed98ae579761d64a864032b"}, "mark": {"type": "rule", "color": "black", "strokeDash": [4, 3], "strokeWidth": 1}, "encoding": {"x": {"field": "x", "type": "quantitative"}}}, {"data": {"name": "data-4ac84df98ffd80803abdb3baa1a77815"}, "mark": {"type": "rule", "strokeWidth": 2.2}, "encoding": {"color": {"field": "color", "legend": null, "scale": null, "type": "nominal"}, "x": {"axis": {"labelFontSize": 11, "titleFontSize": 12}, "field": "zero", "title": "% change vs. pre-outage baseline", "type": "quantitative"}, "x2": {"field": "rel_change"}, "y": {"axis": {"labelFontSize": 12}, "field": "crime_type", "sort": ["BURGLARY", "CRIMINAL TRESPASS", "CRIMINAL DAMAGE", "ASSAULT", "THEFT", "MOTOR VEHICLE THEFT", "ALL CRIMES", "BATTERY", "OTHER OFFENSE", "ROBBERY", "NARCOTICS"], "title": null, "type": "nominal"}}}, {"data": {"name": "data-4ac84df98ffd80803abdb3baa1a77815"}, "mark": {"type": "point", "filled": true, "size": 90}, "encoding": {"color": {"field": "color", "legend": null, "scale": null, "type": "nominal"}, "x": {"field": "rel_change", "type": "quantitative"}, "y": {"axis": {"labelFontSize": 12}, "field": "crime_type", "sort": ["BURGLARY", "CRIMINAL TRESPASS", "CRIMINAL DAMAGE", "ASSAULT", "THEFT", "MOTOR VEHICLE THEFT", "ALL CRIMES", "BATTERY", "OTHER OFFENSE", "ROBBERY", "NARCOTICS"], "title": null, "type": "nominal"}}}, {"data": {"name": "data-4ac84df98ffd80803abdb3baa1a77815"}, "mark": {"type": "text", "align": "left", "dx": 6, "dy": 1, "fontSize": 10}, "encoding": {"color": {"value": "black"}, "text": {"field": "label", "type": "nominal"}, "x": {"field": "rel_change", "type": "quantitative"}, "y": {"axis": {"labelFontSize": 12}, "field": "crime_type", "sort": ["BURGLARY", "CRIMINAL TRESPASS", "CRIMINAL DAMAGE", "ASSAULT", "THEFT", "MOTOR VEHICLE THEFT", "ALL CRIMES", "BATTERY", "OTHER OFFENSE", "ROBBERY", "NARCOTICS"], "title": null, "type": "nominal"}}}], "height": 340, "title": {"text": "Outages shift the crime mix", "fontSize": 14}, "width": 460, "$schema": "https://vega.github.io/schema/vega-lite/v5.20.1.json", "datasets": {"data-d285a7403ed98ae579761d64a864032b": [{"x": 0}], "data-4ac84df98ffd80803abdb3baa1a77815": [{"crime_type": "BURGLARY", "rel_change": -26.984126984126984, "is_overall": false, "zero": 0, "color": "#2c7bb6", "label": "-27.0%"}, {"crime_type": "CRIMINAL TRESPASS", "rel_change": 0.0, "is_overall": false, "zero": 0, "color": "#2c7bb6", "label": "0.0%"}, {"crime_type": "CRIMINAL DAMAGE", "rel_change": 1.4492753623188406, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+1.4%"}, {"crime_type": "ASSAULT", "rel_change": 8.695652173913043, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+8.7%"}, {"crime_type": "THEFT", "rel_change": 12.790697674418606, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+12.8%"}, {"crime_type": "MOTOR VEHICLE THEFT", "rel_change": 19.298245614035086, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+19.3%"}, {"crime_type": "BATTERY", "rel_change": 20.967741935483872, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+21.0%"}, {"crime_type": "OTHER OFFENSE", "rel_change": 32.55813953488372, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+32.6%"}, {"crime_type": "ROBBERY", "rel_change": 44.18604651162791, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+44.2%"}, {"crime_type": "NARCOTICS", "rel_change": 72.32142857142857, "is_overall": false, "zero": 0, "color": "#d7191c", "label": "+72.3%"}, {"crime_type": "ALL CRIMES", "rel_change": 19.732441471571907, "is_overall": true, "zero": 0, "color": "#333333", "label": "+19.7%"}]}};
+      var embedOpt = {"mode": "vega-lite"};
+
+      function showError(el, error){
+          el.innerHTML = ('<div style="color:red;">'
+                          + '<p>JavaScript Error: ' + error.message + '</p>'
+                          + "<p>This usually means there's a typo in your chart specification. "
+                          + "See the javascript console for the full traceback.</p>"
+                          + '</div>');
+          throw error;
+      }
+      const el = document.getElementById('vis');
+      vegaEmbed("#vis", spec, embedOpt)
+        .catch(error => showError(el, error));
+    })(vegaEmbed);
+
+  </script>
+</body>
+</html>

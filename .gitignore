@@ -1,8 +1,13 @@
-# ignore downloaded datasets
-data/*
+# ignore raw data (large downloaded files)
+data/raw_data/
 
-# keep folder structure
-!data/.gitkeep
+# keep derived data and folder structure
+!data/derived_data/
+
+# derived files >100MB (too large for git)
+data/derived_data/streetlight_buffers.geojson
+data/derived_data/all_crimes_streetlight_joined.geojson
+data/derived_data/tract_day_crime_outage_panel.csv
 
 # Python cache
 __pycache__/
