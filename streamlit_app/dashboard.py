@@ -223,11 +223,22 @@ def compute_2018_risk(cutoff_week_str: str) -> pd.DataFrame:
 
 @st.cache_data
 def load_acs() -> pd.DataFrame:
-    df = pd.read_csv(_DERIVED / "chicago_streetlights_tract_data.csv",
-                     usecols=["tract_geoid","population","population_density",
-                              "pct_black","pct_white","pct_college","unemployment_rate"])
-    df["tract_geoid"] = df["tract_geoid"].astype(str)
-    return df.set_index("tract_geoid")
+    _COLS = ["population","population_density","pct_black","pct_white",
+             "pct_college","unemployment_rate"]
+    nhgis_path = _RAW / "nhgis0001_csv" / "nhgis0001_ds215_20155_tract.csv"
+    if not nhgis_path.exists():
+        return pd.DataFrame(columns=_COLS, dtype=float)
+    nhgis = load_nhgis_census()[["population","pct_black","pct_white",
+                                  "pct_bachelors","unemployment_rate"]].copy()
+    nhgis = nhgis.rename(columns={"pct_bachelors": "pct_college"})
+    area = pd.read_csv(_DERIVED / "chicago_streetlights_tract_data.csv",
+                       usecols=["tract_geoid","ALAND"],
+                       dtype={"tract_geoid": str})
+    area = area.dropna(subset=["ALAND"]).drop_duplicates("tract_geoid").set_index("tract_geoid")
+    df = nhgis.join(area, how="left")
+    df["population_density"] = df["population"] / (df["ALAND"] / 1_000_000)
+    return df[["population","population_density","pct_black","pct_white",
+               "pct_college","unemployment_rate"]]
 
 
 @st.cache_data
@@ -871,10 +882,7 @@ elif page == "Hotspot Analysis":
     st.markdown("---")
     st.subheader(f"Top {n_hotspots_found} hotspot tracts — risk scores & community profile")
 
-    acs = pd.read_csv(_DERIVED / "chicago_streetlights_tract_data.csv",
-                      usecols=["tract_geoid","population","population_density",
-                               "pct_black","pct_white","pct_college","unemployment_rate"])
-    acs["tract_geoid"] = acs["tract_geoid"].astype(str)
+    acs = load_acs().reset_index()
 
     top_risk = risk_sorted.head(n_hotspots)[
         ["tract_geoid","mean_residual","mean_actual","mean_predicted","latest_outage_rate","n_weeks"]
