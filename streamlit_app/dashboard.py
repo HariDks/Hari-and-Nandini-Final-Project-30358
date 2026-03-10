@@ -18,7 +18,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import pathlib
-import datetime
 from scipy import stats as scipy_stats
 
 import streamlit as st
@@ -125,28 +124,9 @@ def load_data():
     df["completion_date"] = pd.to_datetime(df["completion_date"])
     df["crime_date"]      = pd.to_datetime(df["crime_date"])
 
-    # Streetlight point locations
-    relevant_ids = set(df["request_id"].dropna().unique())
-
-    sl_csv = pd.read_csv(
-        "https://drive.google.com/uc?export=download&id=1xXD7MfVM1uECP2wtZWfHenNuq8IyO7lm",
-        usecols=["service_request_number", "latitude", "longitude"],
-        dtype={"service_request_number": str},
-    )
-
-    sl_csv = sl_csv.dropna(subset=["latitude", "longitude"]).rename(
-        columns={
-            "service_request_number": "request_id",
-            "latitude": "sl_lat",
-            "longitude": "sl_lng",
-        }
-    )
-
-    sl_locs = sl_csv[sl_csv["request_id"].isin(relevant_ids)].drop_duplicates("request_id")
-
     crime_types = sorted(df["primary_type"].dropna().unique())
 
-    return df, tract_polys, sl_locs, crime_types
+    return df, tract_polys, crime_types
 
 
 @st.cache_data
@@ -459,45 +439,9 @@ def compute_tract_metrics(df: pd.DataFrame, K: int) -> pd.DataFrame:
     return m
 
 
-# ─── Per-day data for the Overview map ────────────────────────────────────────
-def get_day_data(selected: pd.Timestamp):
-    """
-    For a given date, return:
-      sl_pts   — streetlight outage point locations active on that day
-      cr_pts   — crime points that occurred on that day (in any outage buffer)
-      tract_counts — per-tract (n_outages, n_crimes)
-    Uses the 30 m buffer events as the reference dataset (widest spatial coverage).
-    """
-    df30 = events[events["buffer_radius_m"] == 30]
-
-    # Active outages: creation_date ≤ selected ≤ completion_date
-    active_mask = (df30["creation_date"] <= selected) & (df30["completion_date"] >= selected)
-    active_reqs = (
-        df30[active_mask]
-        .drop_duplicates("request_id")[["request_id", "tract_geoid"]]
-    )
-
-    # Streetlight point locations for active requests
-    sl_pts = active_reqs.merge(sl_locs, on="request_id", how="inner")
-
-    # Crimes on that exact calendar day
-    day_crimes = df30[df30["crime_date"].dt.normalize() == selected.normalize()].copy()
-
-    # Per-tract counts
-    tract_outages = active_reqs.groupby("tract_geoid").size().rename("n_outages").reset_index()
-    tract_crimes  = day_crimes.groupby("tract_geoid").size().rename("n_crimes").reset_index()
-    tract_counts  = (
-        tract_outages.merge(tract_crimes, on="tract_geoid", how="outer")
-        .fillna(0)
-        .astype({"n_outages": int, "n_crimes": int})
-    )
-
-    return sl_pts, day_crimes, tract_counts
-
-
 # ─── Load shared data ─────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
-    events, tract_polys, sl_locs, _ = load_data()
+    events, tract_polys, _ = load_data()
 
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
@@ -506,30 +450,7 @@ with st.sidebar:
     page = st.selectbox("Page", ["Overview", "Crime Impact", "Hotspot Analysis", "Law Enforcement Dashboard"])
     st.markdown("---")
 
-    if page == "Overview":
-        st.markdown("### Overview controls")
-        ov_date = st.date_input(
-            "Select a day",
-            value=datetime.date(2015, 7, 4),
-            min_value=datetime.date(2011, 1, 1),
-            max_value=datetime.date(2018, 12, 12),
-            help="Shows active streetlight outages and crimes recorded on this date",
-        )
-        ov_color_by = st.radio(
-            "Color tracts by",
-            ["Active outages", "Crimes in buffer"],
-            horizontal=True,
-        )
-        st.markdown("---")
-        st.caption(
-            "Map layers:\n"
-            "- **Tracts** — colored by selected metric\n"
-            "- **Yellow dots** — active streetlight outage locations\n"
-            "- **Red dots** — crime locations recorded on this day\n\n"
-            "Use the **Zoom to tract** selector on the main page to drill into a tract."
-        )
-
-    elif page == "Crime Impact":
+    if page == "Crime Impact":
         radius = st.radio("Buffer radius (m)", [15, 30, 50], index=1, horizontal=True,
                           help="Spatial buffer around each streetlight complaint used to count nearby crimes")
         K = st.radio("Symmetric window K (days)", [5, 10], index=0, horizontal=True,
@@ -609,212 +530,6 @@ if page == "Overview":
     # ── Title + writeup ───────────────────────────────────────────────────────
     st.title("Crime and Streetlight Outage in Chicago")
     st.markdown(OVERVIEW_DESCRIPTION)
-    st.markdown("---")
-
-    # ── Compute data for selected day ─────────────────────────────────────────
-    selected_ts = pd.Timestamp(ov_date)
-    sl_pts, day_crimes, tract_counts = get_day_data(selected_ts)
-
-    # KPI strip
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Date",             ov_date.strftime("%b %d, %Y"))
-    k2.metric("Active outages",   f"{len(sl_pts):,}",     help="Streetlight requests active on this day")
-    k3.metric("Crimes recorded",  f"{len(day_crimes):,}", help="Crimes within any outage buffer on this day")
-    k4.metric("Tracts affected",  f"{len(tract_counts[tract_counts['n_outages'] > 0]):,}")
-    st.markdown("---")
-
-    # ── Tract selector — populated with tracts active on this day ─────────────
-    active_tract_ids = sorted(
-        tract_counts[tract_counts["n_outages"] > 0]["tract_geoid"].astype(str).tolist()
-    )
-    tract_options  = ["(none — show all)"] + active_tract_ids
-    selected_tract = st.selectbox(
-        "Zoom to tract — select a tract to drill into its individual outage and crime points",
-        options=tract_options,
-        key="ov_tract_select",
-    )
-    tract_zoomed = selected_tract != "(none — show all)"
-
-    # ── Build pydeck layers ───────────────────────────────────────────────────
-    color_col  = "n_outages" if ov_color_by == "Active outages" else "n_crimes"
-    tract_map  = tract_polys.merge(tract_counts, on="tract_geoid", how="left").fillna(0)
-    tract_map["n_outages"] = tract_map["n_outages"].astype(int)
-    tract_map["n_crimes"]  = tract_map["n_crimes"].astype(int)
-
-    col_vals = tract_map[color_col].values
-    vmax     = float(np.nanquantile(col_vals, 0.95)) or 1.0
-
-    def ov_color(v, col):
-        n = max(0.0, min(1.0, float(v) / vmax))
-        if col == "n_outages":
-            # white → amber → dark orange
-            return [int(255), int(200 - 180 * n), int(50 - 50 * n), 180]
-        else:
-            # white → salmon → crimson
-            return [int(220), int(220 * (1 - n)), int(220 * (1 - n)), 180]
-
-    tract_features = []
-    for _, row in tract_map.iterrows():
-        if row.geometry is None or row.geometry.is_empty:
-            continue
-        gid      = str(row["tract_geoid"])
-        is_sel   = tract_zoomed and gid == selected_tract
-        fc       = [30, 144, 255, 230] if is_sel else ov_color(row[color_col], color_col)
-        lc       = [0, 80, 200, 255]   if is_sel else [80, 80, 80, 80]
-        tract_features.append({
-            "type":     "Feature",
-            "geometry": shapely.geometry.mapping(row.geometry),
-            "properties": {
-                "tract_geoid": gid,
-                "n_outages":   int(row["n_outages"]),
-                "n_crimes":    int(row["n_crimes"]),
-                "fill_color":  fc,
-                "line_color":  lc,
-            },
-        })
-
-    # Streetlight points (yellow)
-    sl_records = [
-        {"lng": float(r["sl_lng"]), "lat": float(r["sl_lat"]),
-         "tract": str(r["tract_geoid"]), "request_id": str(r["request_id"])}
-        for _, r in sl_pts.iterrows()
-        if not (pd.isna(r["sl_lat"]) or pd.isna(r["sl_lng"]))
-    ]
-
-    # Crime points (red)
-    cr_records = [
-        {"lng": float(r["lng"]), "lat": float(r["lat"]),
-         "type": str(r["primary_type"]), "tract": str(r["tract_geoid"])}
-        for _, r in day_crimes.iterrows()
-        if not (pd.isna(r["lat"]) or pd.isna(r["lng"]))
-    ]
-
-    # If a tract is selected, filter points to that tract only
-    if tract_zoomed:
-        sl_records = [p for p in sl_records if p["tract"] == selected_tract]
-        cr_records = [p for p in cr_records if p["tract"] == selected_tract]
-
-    layers = [
-        pdk.Layer(
-            "GeoJsonLayer",
-            {"type": "FeatureCollection", "features": tract_features},
-            pickable=True, stroked=True, filled=True,
-            get_fill_color="properties.fill_color",
-            get_line_color="properties.line_color",
-            line_width_min_pixels=0.5,
-        ),
-        pdk.Layer(
-            "ScatterplotLayer",
-            sl_records,
-            get_position=["lng", "lat"],
-            get_fill_color=[255, 200, 0, 220],   # yellow
-            get_line_color=[180, 120, 0, 200],
-            get_radius=80,
-            radius_min_pixels=3,
-            radius_max_pixels=12,
-            pickable=True,
-            stroked=True,
-            line_width_min_pixels=1,
-        ),
-        pdk.Layer(
-            "ScatterplotLayer",
-            cr_records,
-            get_position=["lng", "lat"],
-            get_fill_color=[220, 30, 30, 200],   # red
-            get_line_color=[140, 0, 0, 200],
-            get_radius=60,
-            radius_min_pixels=3,
-            radius_max_pixels=10,
-            pickable=True,
-            stroked=True,
-            line_width_min_pixels=1,
-        ),
-    ]
-
-    # View — zoom to selected tract's centroid, or default city view
-    if tract_zoomed:
-        sel_geom = tract_map[tract_map["tract_geoid"].astype(str) == selected_tract]
-        if len(sel_geom) > 0:
-            cx = sel_geom.geometry.centroid.x.iloc[0]
-            cy = sel_geom.geometry.centroid.y.iloc[0]
-            view = pdk.ViewState(latitude=cy, longitude=cx, zoom=14, pitch=0)
-        else:
-            view = pdk.ViewState(latitude=41.83, longitude=-87.68, zoom=10, pitch=0)
-    else:
-        view = pdk.ViewState(latitude=41.83, longitude=-87.68, zoom=10, pitch=0)
-
-    st.subheader(
-        f"{'Tract ' + selected_tract if tract_zoomed else 'All tracts'}  —  "
-        f"{ov_date.strftime('%B %d, %Y')}"
-    )
-
-    st.pydeck_chart(
-        pdk.Deck(
-            layers=layers,
-            initial_view_state=view,
-            tooltip={
-                "html": (
-                    "<b>Tract:</b> {properties.tract_geoid}<br/>"
-                    "<b>Active outages:</b> {properties.n_outages}<br/>"
-                    "<b>Crimes today:</b> {properties.n_crimes}"
-                    "<br/><br/>"
-                    "<b>Streetlight:</b> {request_id}<br/>"
-                    "<b>Crime type:</b> {type}"
-                ),
-                "style": {
-                    "backgroundColor": "#1a1a2e",
-                    "color": "white",
-                    "fontSize": "13px",
-                    "padding": "8px",
-                },
-            },
-            map_style="mapbox://styles/mapbox/light-v9",
-        ),
-        height=560,
-    )
-
-    # Legend
-    col_word = "outages" if ov_color_by == "Active outages" else "crimes"
-    col_lo   = "white" if ov_color_by == "Active outages" else "white"
-    col_hi   = "orange" if ov_color_by == "Active outages" else "crimson"
-    st.caption(
-        f"Tract color: light → dark = fewer → more {col_word}  |  "
-        f"Yellow dots = active streetlight outages  |  Red dots = crimes in outage buffer"
-    )
-
-    # ── Tract detail table (visible when a tract is zoomed) ───────────────────
-    if tract_zoomed:
-        st.markdown("---")
-        st.subheader(f"Tract {selected_tract} — detail")
-        dc1, dc2 = st.columns(2)
-
-        with dc1:
-            st.markdown("**Active streetlight outages**")
-            if sl_records:
-                sl_df = pd.DataFrame(sl_records)[["request_id", "lat", "lng"]].rename(
-                    columns={"request_id": "Request ID", "lat": "Latitude", "lng": "Longitude"}
-                )
-                st.dataframe(sl_df, use_container_width=True, height=250)
-            else:
-                st.info("No active outages in this tract on this date.")
-
-        with dc2:
-            st.markdown("**Crimes recorded**")
-            if cr_records:
-                cr_df = pd.DataFrame(cr_records)[["type", "lat", "lng"]].rename(
-                    columns={"type": "Crime type", "lat": "Latitude", "lng": "Longitude"}
-                )
-                type_counts = cr_df["Crime type"].value_counts().rename_axis("Crime type").reset_index(name="Count")
-                st.dataframe(type_counts, use_container_width=True, height=250)
-            else:
-                st.info("No crimes recorded in this tract's outage buffers on this date.")
-
-    st.markdown("---")
-    st.caption(
-        "**Data:** Chicago 311 Streetlight Service Requests × Chicago Police Department Incident Reports, 2011–2018.  "
-        "Crimes are counted only if they fall within the spatial buffer of an active outage complaint.  "
-        "Point locations reflect individual crime reports and streetlight complaint coordinates."
-    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
