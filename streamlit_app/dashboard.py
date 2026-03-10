@@ -225,10 +225,10 @@ def compute_2018_risk(cutoff_week_str: str) -> pd.DataFrame:
 def load_acs() -> pd.DataFrame:
     _COLS = ["population","population_density","pct_black","pct_white",
              "pct_college","unemployment_rate"]
-    nhgis_path = _RAW / "nhgis0001_csv" / "nhgis0001_ds215_20155_tract.csv"
-    if not nhgis_path.exists():
-        return pd.DataFrame(columns=_COLS, dtype=float)
-    nhgis = load_nhgis_census()[["population","pct_black","pct_white",
+    nhgis = load_nhgis_census()
+    if nhgis.empty:
+        return pd.DataFrame(columns=_COLS, dtype=float).rename_axis("tract_geoid")
+    nhgis = nhgis[["population","pct_black","pct_white",
                                   "pct_bachelors","unemployment_rate"]].copy()
     nhgis = nhgis.rename(columns={"pct_bachelors": "pct_college"})
     area = pd.read_csv(_DERIVED / "chicago_streetlights_tract_data.csv",
@@ -300,10 +300,14 @@ def load_nhgis_census() -> pd.DataFrame:
         "STATE",
     ]
 
-    df = pd.read_csv(
-        "https://drive.google.com/uc?export=download&id=1WaiWZD1l6JUP24ZAO3nnzIpPBYKNRwTX",
-        usecols=keep
-    )
+    local_path = _RAW / "nhgis0001_csv" / "nhgis0001_ds215_20155_tract.csv"
+    if local_path.exists():
+        df = pd.read_csv(local_path, usecols=keep)
+    else:
+        df = pd.read_csv(
+            "https://drive.google.com/uc?export=download&id=1WaiWZD1l6JUP24ZAO3nnzIpPBYKNRwTX",
+            usecols=keep
+        )
 
     df = df[df["STATE"] == "Illinois"].copy()
 
